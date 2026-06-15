@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="de">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Budget Tracker</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="page-container">
+        <header>
+            <h1>Budget Tracker</h1>
+            <p>Erfasse Einnahmen und Ausgaben und sieh dir die Auswertung an.</p>
+        </header>
+
+        <section class="card form-card">
+            <h2>Neue Transaktion</h2>
+            <form id="transaction-form">
+                <div class="field-group">
+                    <label for="datum">Datum</label>
+                    <input id="datum" name="datum" type="date" required>
+                </div>
+                <div class="field-group">
+                    <label for="typ">Typ</label>
+                    <select id="typ" name="typ" required>
+                        <option value="EINNAHME">Einnahme</option>
+                        <option value="AUSGABE">Ausgabe</option>
+                    </select>
+                </div>
+                <div class="field-group">
+                    <label for="kategorie">Kategorie</label>
+                    <select id="kategorie" name="kategorie" required></select>
+                </div>
+                <div class="field-group">
+                    <label for="betrag">Betrag</label>
+                    <input id="betrag" name="betrag" type="number" step="0.01" min="0.01" required>
+                </div>
+                <div class="field-group">
+                    <label for="beschreibung">Beschreibung</label>
+                    <input id="beschreibung" name="beschreibung" type="text" maxlength="100" required>
+                </div>
+                <button type="submit">Speichern</button>
+                <p class="form-message" id="form-message"></p>
+            </form>
+        </section>
+
+        <section class="card summary-card">
+            <h2>Monatsübersicht</h2>
+            <div class="inline-fields">
+                <input id="summary-year" type="number" step="1" min="1900" placeholder="Jahr" value="2025">
+                <input id="summary-month" type="number" step="1" min="1" max="12" placeholder="Monat" value="1">
+                <button id="load-summary">Laden</button>
+            </div>
+            <div id="monthly-summary" class="result-box"></div>
+        </section>
+
+        <section class="card stats-card">
+            <h2>Kategorienstatistik</h2>
+            <div class="inline-fields">
+                <select id="stats-type">
+                    <option value="ALLE">Alle</option>
+                    <option value="EINNAHME">Einnahmen</option>
+                    <option value="AUSGABE">Ausgaben</option>
+                </select>
+                <button id="load-stats">Laden</button>
+            </div>
+            <div id="category-stats" class="result-box"></div>
+        </section>
+
+        <section class="card chart-card">
+            <h2>Visuelle Auswertung</h2>
+            <div class="chart-grid">
+                <div class="chart-panel">
+                    <h3>Monatliche Einnahmen & Ausgaben</h3>
+                    <canvas id="monthly-chart"></canvas>
+                </div>
+                <div class="chart-panel">
+                    <h3>Kategorie-Verteilung</h3>
+                    <canvas id="category-chart"></canvas>
+                </div>
+            </div>
+        </section>
+
+        <section class="card table-card">
+            <h2>Alle Transaktionen</h2>
+            <button id="refresh-transactions">Aktualisieren</button>
+            <div class="table-wrapper">
+                <table id="transactions-table">
+                    <thead>
+                        <tr>
+                            <th>Datum</th>
+                            <th>Typ</th>
+                            <th>Kategorie</th>
+                            <th>Betrag</th>
+                            <th>Beschreibung</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </section>
+    </div>
+
+    <script>
+        const einnahmeKategorien = {{ einkommen | tojson | safe }};
+        const ausgabeKategorien = {{ ausgaben | tojson | safe }};
+
+        const typSelect = document.getElementById("typ");
+        const kategorieSelect = document.getElementById("kategorie");
+        const formMessage = document.getElementById("form-message");
+        const transactionForm = document.getElementById("transaction-form");
+        const refreshButton = document.getElementById("refresh-transactions");
+        const transactionsTable = document.querySelector("#transactions-table tbody");
+        const summaryYear = document.getElementById("summary-year");
+        const summaryMonth = document.getElementById("summary-month");
+        const loadSummaryButton = document.getElementById("load-summary");
+        const summaryOutput = document.getElementById("monthly-summary");
+        const statsType = document.getElementById("stats-type");
+        const loadStatsButton = document.getElementById("load-stats");
+        const statsOutput = document.getElementById("category-stats");
+
+        function updateCategoryOptions() {
+            const typ = typSelect.value;
+            const categories = typ === "EINNAHME" ? einnahmeKategorien : ausgabeKategorien;
+            kategorieSelect.innerHTML = categories.map(c => `<option value="${c}">${c}</option>`).join("");
+        }
+
+        async function loadTransactions() {
+            const res = await fetch("/api/transactions");
+            const data = await res.json();
+            transactionsTable.innerHTML = data
+                .sort((a, b) => a.datum.localeCompare(b.datum))
+                .map(t => `
+                    <tr>
+                        <td>${t.datum}</td>
+                        <td>${t.typ}</td>
+                        <td>${t.kategorie}</td>
+                        <td>${t.betrag.toFixed(2)} CHF</td>
+                        <td>${t.beschreibung}</td>
+                    </tr>
+                `)
+                .join("");
+            return data;
+        }
+
+        function buildMonthlyChartData(transactions) {
+            const monthly = {};
+            transactions.forEach(t => {
+                const key = t.datum.slice(0, 7);
+                if (!monthly[key]) {
+                    monthly[key] = { einnahmen: 0, ausgaben: 0 };
+                }
+                const betrag = Number(t.betrag) || 0;
+                if (t.typ === "EINNAHME") {
+                    monthly[key].einnahmen += betrag;
+                } else if (t.typ === "AUSGABE") {
+                    monthly[key].ausgaben += betrag;
+                }
+            });
+
+            const labels = Object.keys(monthly).sort();
+            return {
+                labels,
+                einnahmen: labels.map(key => monthly[key].einnahmen),
+                ausgaben: labels.map(key => monthly[key].ausgaben),
+            };
+        }
+
+        function buildCategoryChartData(transactions) {
+            const categories = {};
+            transactions.forEach(t => {
+                const betrag = Number(t.betrag) || 0;
+                if (!categories[t.kategorie]) {
+                    categories[t.kategorie] = 0;
+                }
+                categories[t.kategorie] += betrag;
+            });
+
+            const entries = Object.entries(categories)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 10);
+
+            return {
+                labels: entries.map(e => e[0]),
+                values: entries.map(e => e[1]),
+            };
+        }
+
+        let monthlyChart;
+        let categoryChart;
+
+        function renderCharts(transactions) {
+            const monthlyData = buildMonthlyChartData(transactions);
+            const categoryData = buildCategoryChartData(transactions);
+
+            const monthlyCtx = document.getElementById("monthly-chart").getContext("2d");
+            const categoryCtx = document.getElementById("category-chart").getContext("2d");
+
+            if (monthlyChart) {
+                monthlyChart.destroy();
+            }
+            monthlyChart = new Chart(monthlyCtx, {
+                type: "line",
+                data: {
+                    labels: monthlyData.labels,
+                    datasets: [
+                        {
+                            label: "Einnahmen",
+                            data: monthlyData.einnahmen,
+                            borderColor: "#16a34a",
+                            backgroundColor: "rgba(22, 163, 74, 0.15)",
+                            tension: 0.3,
+                        },
+                        {
+                            label: "Ausgaben",
+                            data: monthlyData.ausgaben,
+                            borderColor: "#dc2626",
+                            backgroundColor: "rgba(220, 38, 38, 0.15)",
+                            tension: 0.3,
+                        },
+                    ],
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: {
+                            title: { display: true, text: "Monat" },
+                        },
+                        y: {
+                            title: { display: true, text: "Betrag (CHF)" },
+                        },
+                    },
+                },
+            });
+
+            if (categoryChart) {
+                categoryChart.destroy();
+            }
+            categoryChart = new Chart(categoryCtx, {
+                type: "doughnut",
+                data: {
+                    labels: categoryData.labels,
+                    datasets: [{
+                        data: categoryData.values,
+                        backgroundColor: [
+                            "#3b82f6",
+                            "#6366f1",
+                            "#14b8a6",
+                            "#f59e0b",
+                            "#ef4444",
+                            "#8b5cf6",
+                            "#f97316",
+                            "#10b981",
+                            "#0ea5e9",
+                            "#f43f5e",
+                        ],
+                    }],
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                },
+            });
+        }
+
+        async function loadCharts(data) {
+            const transactions = data || await loadTransactions();
+            renderCharts(transactions);
+        }
+
+        async function loadMonthlySummary() {
+            const year = summaryYear.value;
+            const month = summaryMonth.value;
+            const res = await fetch(`/api/monthly-summary?year=${encodeURIComponent(year)}&month=${encodeURIComponent(month)}`);
+            const json = await res.json();
+            if (!res.ok) {
+                summaryOutput.textContent = json.error || "Fehler beim Laden.";
+                return;
+            }
+            summaryOutput.innerHTML = `
+                <p>Monat: ${json.jahr}-${String(json.monat).padStart(2, "0")}</p>
+                <p>Anzahl Transaktionen: ${json.anzahl_transaktionen}</p>
+                <p>Gesamteinnahmen: ${json.gesamteinnahmen.toFixed(2)} CHF</p>
+                <p>Gesamtausgaben: ${json.gesamtausgaben.toFixed(2)} CHF</p>
+                <p>Saldo: ${json.saldo.toFixed(2)} CHF</p>
+            `;
+        }
+
+        async function loadCategoryStats() {
+            const type = statsType.value;
+            const res = await fetch(`/api/category-stats?type=${encodeURIComponent(type)}`);
+            const json = await res.json();
+            if (!res.ok) {
+                statsOutput.textContent = json.error || "Fehler beim Laden.";
+                return;
+            }
+            if (!json.stats.length) {
+                statsOutput.textContent = "Keine Transaktionen gefunden.";
+                return;
+            }
+            statsOutput.innerHTML = `<ul>${json.stats.map(item => `<li>${item.kategorie}: ${item.summe.toFixed(2)} CHF</li>`).join("")}</ul>`;
+        }
+
+        typSelect.addEventListener("change", updateCategoryOptions);
+
+        transactionForm.addEventListener("submit", async event => {
+            event.preventDefault();
+            const body = {
+                datum: document.getElementById("datum").value,
+                typ: typSelect.value,
+                kategorie: kategorieSelect.value,
+                betrag: document.getElementById("betrag").value,
+                beschreibung: document.getElementById("beschreibung").value,
+            };
+
+            const res = await fetch("/api/transactions", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body),
+            });
+            const json = await res.json();
+            if (!res.ok) {
+                formMessage.textContent = json.error || "Fehler beim Speichern.";
+                formMessage.className = "form-message error";
+                return;
+            }
+            formMessage.textContent = json.message;
+            formMessage.className = "form-message success";
+            transactionForm.reset();
+            updateCategoryOptions();
+            await loadTransactions();
+        });
+
+        refreshButton.addEventListener("click", () => loadTransactions().then(loadCharts));
+        loadSummaryButton.addEventListener("click", loadMonthlySummary);
+        loadStatsButton.addEventListener("click", loadCategoryStats);
+
+        updateCategoryOptions();
+        loadTransactions().then(loadCharts);
+
+    </script>
+</body>
+</html>
